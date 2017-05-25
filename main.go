@@ -1,16 +1,17 @@
 package main
 
 import (
-	"log"
-	"github.com/gorilla/mux"
-	"github.com/gorilla/handlers"
-	"os"
-	"net/http"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"crypto/sha256"
-	"strings"
 	"io"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
 )
 
 type Response struct {
@@ -26,11 +27,41 @@ type paramRequest struct {
 	Landscape   string
 }
 
+type fileRequest struct {
+	Path    string
+	Version string
+}
+
+func (f fileRequest) valid() bool {
+	if f.Path == "" || f.Version == "" {
+		return false
+	}
+	return true
+}
+
 func (p paramRequest) valid() bool {
 	if p.Application == "" || p.Environment == "" || p.Version == "" || p.Landscape == "" {
 		return false
 	}
 	return true
+}
+
+func (p fileRequest) badRequest(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	var m = make(map[string]string)
+	expected := strings.ToLower(fmt.Sprintf("%+v", fileRequest{"STRING", "STRING"}))
+	m["error"] = fmt.Sprintf("Bad request, expected: %s, got: %s", expected, strings.ToLower(fmt.Sprintf("%+v", p)))
+	resp := Response{Data: m, status: http.StatusBadRequest}
+	JSONResponseHandler(w, resp)
+}
+
+func (p paramRequest) badRequest(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	var m = make(map[string]string)
+	expected := strings.ToLower(fmt.Sprintf("%+v", paramRequest{"STRING", "STRING", "STRING", "STRING"}))
+	m["error"] = fmt.Sprintf("Bad request, expected: %s, got: %s", expected, strings.ToLower(fmt.Sprintf("%+v", p)))
+	resp := Response{Data: m, status: http.StatusBadRequest}
+	JSONResponseHandler(w, resp)
 }
 
 func (p paramRequest) envPrefix() string {
@@ -45,9 +76,17 @@ func (p paramRequest) identifier() string {
 	return fmt.Sprintf("%s@%s", p.envPrefix(), p.Version)
 }
 
+func (f fileRequest) identifier() string {
+	return fmt.Sprintf("%s@%s", f.Path, f.Version)
+}
+
+func (f fileRequest) cacheKey() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(f.identifier())))
+}
+
 var (
-	CACHE = make(map[string]Response)
-	region = "us-east-2"//os.Getenv("AWS_REGION")
+	CACHE      = make(map[string]Response)
+	region     = "us-east-1" //os.Getenv("AWS_REGION")
 	AppVersion = "0.0.1"
 )
 
@@ -71,6 +110,7 @@ func api() {
 func registerHandlers(r *mux.Router) {
 	r.NotFoundHandler = http.HandlerFunc(notFoundHandler)
 	r.HandleFunc("/params", envHandler).Methods("POST")
+	r.HandleFunc("/file", fileHandler).Methods("POST")
 }
 
 func parseParamRequestBody(b io.ReadCloser) paramRequest {
@@ -84,16 +124,53 @@ func parseParamRequestBody(b io.ReadCloser) paramRequest {
 	return p
 }
 
+func parseFileRequestBody(b io.ReadCloser) fileRequest {
+	decoder := json.NewDecoder(b)
+	var f fileRequest
+	err := decoder.Decode(&f)
+	if err != nil {
+		log.Printf("encountered issue decoding request body; %s", err.Error())
+		return fileRequest{}
+	}
+	return f
+}
+
 func (p paramRequest) getData() map[string]string {
 	c := ssmClient{NewClient(region)}
 	paramNames := c.WithPrefix(p.envPrefix())
 	return paramNames.IncludeHistory(c).withVersion(p.Version) //todo, return error
 }
 
+func (f fileRequest) getData() string {
+	c := ssmClient{NewClient(region)}
+
+	return c.GetKey(f.Path, f.Version)
+}
+
+func fileHandler(w http.ResponseWriter, r *http.Request) {
+	f := parseFileRequestBody(r.Body)
+	if !f.valid() {
+		f.badRequest(w)
+		return
+	}
+
+	log.Printf("Processing request for %s uniquely identified as %+v", f.identifier(), f.cacheKey())
+	cached, ok := CACHE[f.cacheKey()]
+	if ok {
+		log.Printf("Retrieved parameters from cache")
+		JSONResponseHandler(w, cached)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write([]byte(f.getData()))
+}
+
 func envHandler(w http.ResponseWriter, r *http.Request) {
 	p := parseParamRequestBody(r.Body)
 	if !p.valid() {
-		badRequest(w, p)
+		p.badRequest(w)
 		return
 	}
 	log.Printf("Processing request for %s uniquely identified as %+v", p.identifier(), p.cacheKey())
@@ -104,7 +181,7 @@ func envHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := p.getData()
-	resp := Response{status:http.StatusOK, Data:data} //todo, check length of list before returning
+	resp := Response{status: http.StatusOK, Data: data} //todo, check length of list before returning
 	//only cache data when elements were found
 	//possible bug - existing versions where new elements are added will still return cached data
 	//should not be a problem since container will be restarted upon config changes
@@ -120,16 +197,7 @@ func notFoundHandler(w http.ResponseWriter, r *http.Request) {
 	var m = make(map[string]string)
 	m["error"] = fmt.Sprintf("Route %s not found with method %s, please check request and try again",
 		r.URL.Path, r.Method)
-	resp := Response{Data:m, status:http.StatusNotFound}
-	JSONResponseHandler(w, resp)
-}
-
-func badRequest(w http.ResponseWriter, p paramRequest) {
-	w.Header().Set("Content-Type", "application/json")
-	var m = make(map[string]string)
-	expected := strings.ToLower(fmt.Sprintf("%+v", paramRequest{"STRING", "STRING", "STRING", "STRING"}))
-	m["error"] = fmt.Sprintf("Bad request, expected: %s, got: %s", expected, strings.ToLower(fmt.Sprintf("%+v", p)))
-	resp := Response{Data:m, status:http.StatusBadRequest}
+	resp := Response{Data: m, status: http.StatusNotFound}
 	JSONResponseHandler(w, resp)
 }
 

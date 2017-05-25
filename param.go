@@ -2,12 +2,13 @@ package main
 
 import "fmt"
 import (
-	"github.com/aws/aws-sdk-go/service/ssm"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
+	"errors"
 	"log"
 	"strings"
-	"errors"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ssm"
 )
 
 type ssmClient struct {
@@ -15,15 +16,14 @@ type ssmClient struct {
 }
 
 type parameter struct {
-	Name string
+	Name     string
 	Versions []paramHistory
-
 }
 
 type parameters []parameter
 
 type paramHistory struct {
-	Value string
+	Value   string
 	Version string
 }
 
@@ -33,15 +33,54 @@ func NewClient(region string) *ssm.SSM {
 	return ssm.New(session)
 }
 
-func (s ssmClient) WithPrefix(prefix string) parameters{
+func (s ssmClient) GetKey(key, version string) string {
+	// getting latest version of the key
+	if version == "" || version == "latest" {
+		params, err := s.client.GetParameters(&ssm.GetParametersInput{
+			Names:          []*string{aws.String(key)},
+			WithDecryption: aws.Bool(true),
+		})
+		if err != nil {
+			log.Println(err)
+		}
+
+		if len(params.Parameters) < 1 {
+			log.Println("error")
+		}
+
+		return *params.Parameters[0].Value
+
+	}
+
+	// getting not latest version of the key
+	history, err := s.client.GetParameterHistory(&ssm.GetParameterHistoryInput{
+		Name:           aws.String(key),
+		WithDecryption: aws.Bool(true),
+	})
+
+	if err != nil {
+		log.Println(err)
+	}
+
+	for _, param := range history.Parameters {
+		if *param.Description == version {
+			return *param.Value
+		}
+	}
+
+	log.Println("Clouldn't find such param version")
+	return ""
+}
+
+func (s ssmClient) WithPrefix(prefix string) parameters {
 	var names parameters
-	resp,err := s.ParamList(prefix)
+	resp, err := s.ParamList(prefix)
 	if err != nil {
 		log.Println("Encountered an error listing params", err)
 		return parameters{}
 	}
-	for _,param := range resp.Parameters {
-		names = append(names,parameter{*param.Name,[]paramHistory{}})
+	for _, param := range resp.Parameters {
+		names = append(names, parameter{*param.Name, []paramHistory{}})
 	}
 	return names
 }
@@ -62,22 +101,22 @@ func (s ssmClient) ParamList(filter string) (*ssm.DescribeParametersOutput, erro
 	return s.client.DescribeParameters(params)
 }
 
-func (p parameters) IncludeHistory(s ssmClient) parameters{
+func (p parameters) IncludeHistory(s ssmClient) parameters {
 	var params parameters
-	for _,param := range p {
+	for _, param := range p {
 		param.history(s)
-		params = append(params,param)
+		params = append(params, param)
 	}
 	return params
 }
 
-func (p *parameter) history(s ssmClient) {//todo, return error
+func (p *parameter) history(s ssmClient) { //todo, return error
 	pi := &ssm.GetParametersInput{
-		Names: []*string{&p.Name},
+		Names:          []*string{&p.Name},
 		WithDecryption: aws.Bool(true),
 	}
 	hpi := &ssm.GetParameterHistoryInput{
-		Name: &p.Name,
+		Name:           &p.Name,
 		WithDecryption: aws.Bool(true),
 	}
 	resp, err := s.client.GetParameterHistory(hpi)
@@ -96,41 +135,41 @@ func (p *parameter) history(s ssmClient) {//todo, return error
 		return
 	}
 	//todo, guard against empty param
-	p.Versions = append(p.Versions,paramHistory{Value:*r.Parameters[0].Value,Version:*re.Parameters[0].Description})
+	p.Versions = append(p.Versions, paramHistory{Value: *r.Parameters[0].Value, Version: *re.Parameters[0].Description})
 	var hist []paramHistory
 	var des string
-	for _,param := range resp.Parameters {
-		if param.Description != nil{
+	for _, param := range resp.Parameters {
+		if param.Description != nil {
 			des = *param.Description
 
 		}
 		val := *param.Value
-		hist = append(hist,paramHistory{Value:val,Version:des })
+		hist = append(hist, paramHistory{Value: val, Version: des})
 	}
-	p.Versions = append(p.Versions,hist...)
+	p.Versions = append(p.Versions, hist...)
 	return
 }
 
-func (p parameters) withVersion(version string) map[string]string{
+func (p parameters) withVersion(version string) map[string]string {
 	paramsDoc := make(map[string]string)
-	for _,param := range p {
-		ver,err := param.containsVersion(version)
+	for _, param := range p {
+		ver, err := param.containsVersion(version)
 		if err != nil {
-			log.Printf("Error: could not find version: %v for param %v",version,param.Name)
+			log.Printf("Error: could not find version: %v for param %v", version, param.Name)
 			continue
 		}
-		ParsedName := strings.Split(param.Name,".") //todo, check if envName matches ENV VAR regex
-		envName := ParsedName[len(ParsedName) - 1]
+		ParsedName := strings.Split(param.Name, ".") //todo, check if envName matches ENV VAR regex
+		envName := ParsedName[len(ParsedName)-1]
 		paramsDoc[envName] = ver.Value
 	}
 	return paramsDoc
 }
 
-func (p parameter) containsVersion(version string) (paramHistory,error) {
-	for _,v := range p.Versions {
+func (p parameter) containsVersion(version string) (paramHistory, error) {
+	for _, v := range p.Versions {
 		if v.Version == version {
-			return v,nil
+			return v, nil
 		}
 	}
-	return paramHistory{},errors.New("Could not find version")
+	return paramHistory{}, errors.New("Could not find version")
 }
