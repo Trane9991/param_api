@@ -23,3 +23,6 @@ report:
 	@shasum -a 256 /tmp/param-api-$(VERSION).tar.gz
 
 .PHONY: all clean build
+
+build_docker:
+	@docker run -it --workdir /go/src/github.com/trane9991/param_api --rm -v $(pwd):/go/src/github.com/trane9991/param_api golang:alpine go build
