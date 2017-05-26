@@ -42,53 +42,8 @@ func api() {
 
 func registerHandlers(r *mux.Router) {
 	r.NotFoundHandler = http.HandlerFunc(notFoundHandler)
-	r.HandleFunc("/params", envHandler).Methods("POST")
+	r.HandleFunc("/params", paramsHandler).Methods("POST")
 	r.HandleFunc("/file", fileHandler).Methods("POST")
-}
-
-func fileHandler(w http.ResponseWriter, r *http.Request) {
-	f := parseFileRequestBody(r.Body)
-	if !f.valid() {
-		f.badRequest(w)
-		return
-	}
-
-	log.Printf("Processing request for %s uniquely identified as %+v", f.identifier(), f.cacheKey())
-	cached, ok := CACHE[f.cacheKey()]
-	if ok {
-		log.Printf("Retrieved parameters from cache")
-		JSONResponseHandler(w, cached)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write([]byte(f.getData()))
-}
-
-func envHandler(w http.ResponseWriter, r *http.Request) {
-	p := parseParamRequestBody(r.Body)
-	if !p.valid() {
-		p.badRequest(w)
-		return
-	}
-	log.Printf("Processing request for %s uniquely identified as %+v", p.identifier(), p.cacheKey())
-	cached, ok := CACHE[p.cacheKey()]
-	if ok {
-		log.Printf("Retrieved parameters from cache")
-		JSONResponseHandler(w, cached)
-		return
-	}
-	data := p.getData()
-	resp := Response{status: http.StatusOK, Data: data} //todo, check length of list before returning
-	//only cache data when elements were found
-	//possible bug - existing versions where new elements are added will still return cached data
-	//should not be a problem since container will be restarted upon config changes
-	//latest is treated as a special version indicator which should not be cached
-	if len(data) > 0 && p.Version != "latest" {
-		CACHE[p.cacheKey()] = resp
-	}
-	JSONResponseHandler(w, resp)
 }
 
 func notFoundHandler(w http.ResponseWriter, r *http.Request) {

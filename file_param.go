@@ -55,3 +55,23 @@ func (f fileRequest) getData() string {
 
 	return c.GetKey(f.Path, f.Version)
 }
+
+func fileHandler(w http.ResponseWriter, r *http.Request) {
+	f := parseFileRequestBody(r.Body)
+	if !f.valid() {
+		f.badRequest(w)
+		return
+	}
+
+	log.Printf("Processing request for %s uniquely identified as %+v", f.identifier(), f.cacheKey())
+	cached, ok := CACHE[f.cacheKey()]
+	if ok {
+		log.Printf("Retrieved parameters from cache")
+		JSONResponseHandler(w, cached)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write([]byte(f.getData()))
+}
